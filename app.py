@@ -41,24 +41,19 @@ def parse_kml_file(uploaded_file):
     
     # Juga cari Placemark langsung di root (tanpa folder)
     for placemark in root.findall('.//{http://www.opengis.net/kml/2.2}Placemark'):
-        # Skip jika sudah ada dalam folder
-        placemark_name = placemark.find('{http://www.opengis.net/kml/2.2}name')
-        placemark_name = placemark_name.text if placemark_name is not None else ''
-        
-        if not any(pm['name'] == placemark_name for pm in all_placemarks):
-            placemark_data = extract_placemark_data(placemark)
-            if placemark_data:
-                all_placemarks.append(placemark_data)
-                # Buat folder virtual untuk placemark tanpa folder
-                folders_data.append({
-                    'name': 'Root Placemarks',
-                    'placemarks': [placemark_data]
-                })
+        placemark_data = extract_placemark_data(placemark)
+        if placemark_data and placemark_data not in all_placemarks:
+            all_placemarks.append(placemark_data)
+            # Buat folder virtual untuk placemark tanpa folder
+            folders_data.append({
+                'name': 'Root Placemarks',
+                'placemarks': [placemark_data]
+            })
     
     return folders_data, all_placemarks
 
 def extract_placemark_data(placemark):
-    """Ekstrak data dari placemark"""
+    """Ekstrak data dari placemark termasuk geometry asli"""
     placemark_data = {}
     
     # Extract name
@@ -69,15 +64,24 @@ def extract_placemark_data(placemark):
     desc_elem = placemark.find('{http://www.opengis.net/kml/2.2}description')
     placemark_data['description'] = desc_elem.text if desc_elem is not None else ''
     
-    # Extract coordinates
-    coords_elem = placemark.find('.//{http://www.opengis.net/kml/2.2}coordinates')
-    placemark_data['coordinates'] = coords_elem.text if coords_elem is not None else 'N/A'
+    # Extract geometry type dan coordinates asli
+    line_string_elem = placemark.find('.//{http://www.opengis.net/kml/2.2}LineString')
+    point_elem = placemark.find('.//{http://www.opengis.net/kml/2.2}Point')
     
-    # Extract geometry type (Point atau LineString)
-    if placemark.find('.//{http://www.opengis.net/kml/2.2}LineString') is not None:
+    if line_string_elem is not None:
         placemark_data['geometry_type'] = 'LineString'
-    else:
+        coords_elem = line_string_elem.find('{http://www.opengis.net/kml/2.2}coordinates')
+        placemark_data['coordinates'] = coords_elem.text if coords_elem is not None else 'N/A'
+        placemark_data['original_geometry'] = 'LineString'
+    elif point_elem is not None:
         placemark_data['geometry_type'] = 'Point'
+        coords_elem = point_elem.find('{http://www.opengis.net/kml/2.2}coordinates')
+        placemark_data['coordinates'] = coords_elem.text if coords_elem is not None else 'N/A'
+        placemark_data['original_geometry'] = 'Point'
+    else:
+        placemark_data['geometry_type'] = 'Unknown'
+        placemark_data['coordinates'] = 'N/A'
+        placemark_data['original_geometry'] = 'Unknown'
     
     # Extract icon URL
     icon_elem = placemark.find('.//{http://www.opengis.net/kml/2.2}href')
@@ -106,7 +110,7 @@ def identify_type(name, description):
 
 def get_style_for_type(type_name, geometry_type):
     """Dapatkan style berdasarkan tipe dan geometri"""
-    if type_name == 'KU-Line' and geometry_type == 'LineString':
+    if type_name == 'KU-Line':
         return {
             'line_color': 'ff00ff00',  # Hijau
             'line_width': 3,
@@ -165,7 +169,8 @@ def create_enhanced_kml(folders_data):
             <h3>Informasi Titik</h3>
             <b>Nama:</b> {placemark_data['name']}<br/>
             <b>Tipe Teridentifikasi:</b> {placemark_data['type']}<br/>
-            <b>Geometri:</b> {placemark_data['geometry_type']}<br/>
+            <b>Geometri Asli:</b> {placemark_data['original_geometry']}<br/>
+            <b>Geometri Baru:</b> {placemark_data['geometry_type']}<br/>
             <b>Koordinat:</b> {placemark_data['coordinates'][:100]}...<br/>
             <b>Deskripsi Asli:</b> {placemark_data['description']}<br/>
             ]]>
@@ -176,13 +181,18 @@ def create_enhanced_kml(folders_data):
             style = ET.SubElement(placemark_elem, 'Style')
             style_config = get_style_for_type(placemark_data['type'], placemark_data['geometry_type'])
             
-            if placemark_data['type'] == 'KU-Line' and placemark_data['geometry_type'] == 'LineString':
-                # Style untuk LineString KU
+            if placemark_data['type'] == 'KU-Line':
+                # Style untuk LineString KU - HIJAU width 3
                 line_style = ET.SubElement(style, 'LineStyle')
                 color_elem = ET.SubElement(line_style, 'color')
                 color_elem.text = style_config['line_color']  # Hijau
                 width_elem = ET.SubElement(line_style, 'width')
                 width_elem.text = str(style_config['line_width'])  # Width 3
+                
+                # Nonaktifkan icon untuk LineString
+                icon_style = ET.SubElement(style, 'IconStyle')
+                scale = ET.SubElement(icon_style, 'scale')
+                scale.text = '0'  # Sembunyikan icon
             else:
                 # Style untuk Point
                 icon_style = ET.SubElement(style, 'IconStyle')
@@ -190,25 +200,28 @@ def create_enhanced_kml(folders_data):
                 href = ET.SubElement(icon, 'href')
                 href.text = style_config['icon_url']
             
-            # Geometry (Point atau LineString)
+            # Geometry - GUNAKAN LINE STRING ASLI untuk KU
             if placemark_data['type'] == 'KU-Line':
-                # Buat LineString untuk KU
+                # Untuk KU, gunakan LineString asli dari KML
                 line_string = ET.SubElement(placemark_elem, 'LineString')
                 coordinates = ET.SubElement(line_string, 'coordinates')
-                # Untuk demo, buat line sederhana dari koordinat asli
-                if placemark_data['coordinates'] != 'N/A':
-                    # Jika aslinya point, buat line pendek
-                    if ',' in placemark_data['coordinates']:
+                
+                # Gunakan koordinat asli dari data LineString
+                if placemark_data['original_geometry'] == 'LineString':
+                    coordinates.text = placemark_data['coordinates']
+                else:
+                    # Jika aslinya Point, buat LineString sederhana dari koordinat tersebut
+                    if placemark_data['coordinates'] != 'N/A' and ',' in placemark_data['coordinates']:
                         coords = placemark_data['coordinates'].split(',')
                         if len(coords) >= 2:
                             lon = float(coords[0])
                             lat = float(coords[1])
-                            # Buat line pendek (100 meter)
+                            # Buat line pendek dari titik asli
                             line_coords = f"{lon},{lat},0 {lon+0.001},{lat+0.001},0"
                             coordinates.text = line_coords
             else:
-                # Pertahankan geometry asli
-                if placemark_data['geometry_type'] == 'LineString':
+                # Untuk non-KU, pertahankan geometry asli
+                if placemark_data['original_geometry'] == 'LineString':
                     line_string = ET.SubElement(placemark_elem, 'LineString')
                     coordinates = ET.SubElement(line_string, 'coordinates')
                     coordinates.text = placemark_data['coordinates']
@@ -229,41 +242,44 @@ def main():
         layout="wide"
     )
     
-    st.title("🗺️ KML Structure Preserver with Auto Identification")
-    st.markdown("Upload file KML - Struktur folder tetap, -KU menjadi LineString hijau")
+    st.title("🗺️ KML Structure Preserver with Line Preservation")
+    st.markdown("Upload file KML - Struktur folder tetap, -KU menjadi LineString hijau **dengan line asli**")
     
     # Upload file
     uploaded_file = st.file_uploader("Pilih file KML", type=['kml'])
     
     if uploaded_file is not None:
         # Parse KML dengan struktur folder
-        with st.spinner("Menganalisis struktur KML..."):
+        with st.spinner("Menganalisis struktur KML dan line asli..."):
             folders_data, all_placemarks = parse_kml_file(uploaded_file)
         
         if all_placemarks:
-            st.success(f"✅ Berhasil mengidentifikasi {len(all_placemarks)} titik dalam {len(folders_data)} folder!")
+            st.success(f"✅ Berhasil mengidentifikasi {len(all_placemarks)} elemen dalam {len(folders_data)} folder!")
             
-            # Tampilkan summary
-            col1, col2, col3, col4, col5 = st.columns(5)
-            
+            # Analisis data
             type_counts = {}
-            geometry_counts = {'Point': 0, 'LineString': 0}
+            geometry_counts = {'Point': 0, 'LineString': 0, 'Unknown': 0}
+            original_geometry_counts = {'Point': 0, 'LineString': 0, 'Unknown': 0}
             
             for pm in all_placemarks:
                 type_name = pm['type']
                 type_counts[type_name] = type_counts.get(type_name, 0) + 1
                 geometry_counts[pm['geometry_type']] += 1
+                original_geometry_counts[pm['original_geometry']] += 1
+            
+            # Tampilkan summary
+            col1, col2, col3, col4, col5 = st.columns(5)
             
             with col1:
-                st.metric("Total Titik", len(all_placemarks))
+                st.metric("Total Elemen", len(all_placemarks))
             with col2:
                 st.metric("Folder", len(folders_data))
             with col3:
                 st.metric("KU-Line", type_counts.get('KU-Line', 0))
             with col4:
-                st.metric("JC01", type_counts.get('JC01', 0))
+                st.metric("LineString Asli", original_geometry_counts.get('LineString', 0))
             with col5:
-                st.metric("OP01", type_counts.get('OP01', 0))
+                st.metric("Point Asli", original_geometry_counts.get('Point', 0))
             
             # Tampilkan struktur folder
             st.subheader("📁 Struktur Folder KML")
@@ -272,25 +288,23 @@ def main():
                     folder_df = pd.DataFrame([{
                         'Nama': pm['name'],
                         'Tipe': pm['type'],
-                        'Geometri': pm['geometry_type'],
+                        'Geometri Asli': pm['original_geometry'],
+                        'Geometri Baru': pm['geometry_type'],
                         'Koordinat': pm['coordinates'][:50] + '...' if len(pm['coordinates']) > 50 else pm['coordinates']
                     } for pm in folder_data['placemarks']])
                     st.dataframe(folder_df, use_container_width=True)
             
-            # Tampilkan semua data dalam tabel
-            st.subheader("📊 Semua Data Titik Teridentifikasi")
-            df_data = []
-            for pm in all_placemarks:
-                df_data.append({
+            # Tampilkan detail konversi KU
+            ku_elements = [pm for pm in all_placemarks if pm['type'] == 'KU-Line']
+            if ku_elements:
+                st.subheader("🔄 Detail Konversi KU-Line")
+                ku_df = pd.DataFrame([{
                     'Nama': pm['name'],
-                    'Tipe': pm['type'],
-                    'Geometri': pm['geometry_type'],
-                    'Folder': next((fd['name'] for fd in folders_data if pm in fd['placemarks']), 'Unknown'),
-                    'Koordinat': pm['coordinates'][:50] + '...' if len(pm['coordinates']) > 50 else pm['coordinates']
-                })
-            
-            df = pd.DataFrame(df_data)
-            st.dataframe(df, use_container_width=True)
+                    'Geometri Asli': pm['original_geometry'],
+                    'Koordinat Asli': pm['coordinates'][:100] + '...' if len(pm['coordinates']) > 100 else pm['coordinates'],
+                    'Status': '✅ LineString Asli' if pm['original_geometry'] == 'LineString' else '⚠️ Point ke LineString'
+                } for pm in ku_elements])
+                st.dataframe(ku_df, use_container_width=True)
             
             # Download enhanced KML
             st.subheader("📥 Download KML Hasil Identifikasi")
@@ -298,7 +312,7 @@ def main():
             
             # Create download link
             b64 = base64.b64encode(enhanced_kml.encode()).decode()
-            href = f'<a href="data:application/vnd.google-earth.kml+xml;base64,{b64}" download="enhanced_structure.kml">⬇️ Download Enhanced KML</a>'
+            href = f'<a href="data:application/vnd.google-earth.kml+xml;base64,{b64}" download="enhanced_with_original_lines.kml">⬇️ Download Enhanced KML</a>'
             st.markdown(href, unsafe_allow_html=True)
             
             # Preview perubahan
@@ -307,19 +321,20 @@ def main():
             
             with col1:
                 st.write("**Sebelum:**")
-                ku_count_before = len([pm for pm in all_placemarks if '-KU' in pm['name'] and pm['geometry_type'] == 'Point'])
-                st.write(f"- KU sebagai Point: {ku_count_before}")
-                st.write(f"- Total LineString: {geometry_counts['LineString']}")
+                st.write(f"- Total LineString: {original_geometry_counts.get('LineString', 0)}")
+                st.write(f"- Total Point: {original_geometry_counts.get('Point', 0)}")
+                st.write(f"- KU sebagai Point: {len([pm for pm in ku_elements if pm['original_geometry'] == 'Point'])}")
                 
             with col2:
                 st.write("**Sesudah:**")
-                st.write("- KU sebagai LineString: Hijau, Width 3")
-                st.write("- JC01: Icon Forbidden")
-                st.write("- OP01: Icon Blue Stars")
-                st.write("- OTB: Icon Picnic")
+                st.write("🟢 **KU-Line**: LineString hijau, Width 3")
+                st.write("- Menggunakan koordinat line asli dari KML")
+                st.write("- Style: Hijau (#00ff00), Width 3")
+                st.write("🔴 **JC01**: Icon forbidden.png")
+                st.write("🔵 **OP01**: Icon ltblu-stars.png")
             
             # Statistics
-            st.subheader("📈 Statistik Identifikasi")
+            st.subheader("📈 Statistik Detil")
             col1, col2 = st.columns(2)
             
             with col1:
@@ -328,42 +343,44 @@ def main():
                     'Tipe': list(type_counts.keys()),
                     'Jumlah': list(type_counts.values())
                 })
-                st.bar_chart(type_df.set_index('Tipe'))
+                if not type_df.empty:
+                    st.bar_chart(type_df.set_index('Tipe'))
             
             with col2:
-                st.write("**Legenda Style:**")
-                st.write("🟢 **KU-Line**: LineString hijau, width 3")
-                st.write("🔴 **JC01**: Icon forbidden.png")
-                st.write("🔵 **OP01**: Icon ltblu-stars.png") 
-                st.write("🟡 **OTB-4x1-Big-Bay**: Icon picnic.png")
-                st.write("⚪ **Lainnya**: Icon red-circle.png")
+                st.write("**Perbandingan Geometri:**")
+                comparison_df = pd.DataFrame({
+                    'Status': ['Asli', 'Setelah Konversi'],
+                    'Point': [original_geometry_counts.get('Point', 0), geometry_counts.get('Point', 0)],
+                    'LineString': [original_geometry_counts.get('LineString', 0), geometry_counts.get('LineString', 0)]
+                })
+                st.dataframe(comparison_df, use_container_width=True)
         
         else:
-            st.warning("Tidak ada titik yang ditemukan dalam file KML")
+            st.warning("Tidak ada elemen yang ditemukan dalam file KML")
 
     else:
         # Contoh penggunaan
         st.info("""
         **Fitur Aplikasi:**
         - ✅ Pertahankan struktur folder KML asli
-        - ✅ Otomatis identifikasi tipe titik
+        - ✅ Gunakan **LineString asli** dari KML untuk elemen -KU
         - ✅ Konversi **-KU** → **LineString hijau width 3**
-        - ✅ Aturan icon sesuai jenis titik
+        - ✅ Otomatis identifikasi tipe titik
         
-        **Contoh Format yang Didukung:**
+        **Keuntungan:**
+        - Line asli dari KML tetap digunakan (tidak dibuat baru)
+        - Koordinat path asli dipertahankan
+        - Hanya style yang diubah menjadi hijau width 3
+        
+        **Format yang Didukung:**
         ```xml
-        <Folder>
-            <name>Folder Asli</name>
-            <Placemark>
-                <name>R04-CLGO-R015-S13-010-KU01</name>
-                <Point>
-                    <coordinates>106.150271,-6.125063,0</coordinates>
-                </Point>
-            </Placemark>
-        </Folder>
+        <Placemark>
+            <name>R04-CLGO-R015-S13-010-KU01</name>
+            <LineString>
+                <coordinates>106.1,-6.1,0 106.2,-6.2,0 106.3,-6.3,0</coordinates>
+            </LineString>
+        </Placemark>
         ```
-        
-        **Hasil:** -KU akan diubah menjadi LineString hijau
         """)
 
 if __name__ == "__main__":
